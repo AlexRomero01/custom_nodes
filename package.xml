@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>custom_nodes</name>
+  <version>0.0.1</version>
+  <description>Custom nodes for thermal and RGB camera integration</description>
+  
+  <!-- Mantenedores -->
+  <maintainer email="nuria.rodriguez.calderon@upc.edu">Nuria Rodríguez Calderón</maintainer>
+  <maintainer email="yeray@example.com">Yeray Pérez</maintainer>
+  
+  <license>Apache-2.0</license>
+
+  <!-- Herramienta de build -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Dependencias de compilación y export -->
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  <depend>realsense2_camera</depend>
+  <depend>ultralytics_ros</depend>
+  <depend>optris_drivers2</depend>
+
+  <!-- Dependencias de tiempo de ejecución (si hay scripts Python) -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+
