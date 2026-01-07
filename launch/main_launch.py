@@ -27,6 +27,7 @@ def generate_launch_description():
     homography_file_launch_arg = DeclareLaunchArgument("homography_file", default_value='1280')
     name_class_id_launch_arg = DeclareLaunchArgument("name_class", default_value='plant')
     number_class_id_launch_arg = DeclareLaunchArgument("number_class", default_value='0')
+    publish_mqtt_launch_arg = DeclareLaunchArgument("publish_mqtt", default_value='true')
 
     # --- Realsense Camera ---
     launch_include_1 = IncludeLaunchDescription(
@@ -172,6 +173,13 @@ def generate_launch_description():
     )
     delay_mqtt_node = TimerAction(period=6.0, actions=[mqtt_node_process])
 
+    def launch_mqtt_if_enabled(context, *args, **kwargs):
+        if LaunchConfiguration('publish_mqtt').perform(context).lower() == 'true':
+            return [delay_mqtt_node]
+        return []
+
+    conditional_mqtt_launch = OpaqueFunction(function=launch_mqtt_if_enabled)
+
 
     # --- UTM → base_link TF Publisher ---
     utm_base_link_node = ExecuteProcess(
@@ -193,6 +201,7 @@ def generate_launch_description():
         homography_file_launch_arg,
         name_class_id_launch_arg,
         number_class_id_launch_arg,
+        publish_mqtt_launch_arg,
         delay_before_launches,
         delay_between_launches,
         delay_config,
@@ -206,6 +215,6 @@ def generate_launch_description():
         delay_crop_light_state_node,
         delay_biomass_node,
         delay_higrometer_node,
-        delay_mqtt_node,
+        conditional_mqtt_launch,
         delay_utm_node
     ])
