@@ -24,7 +24,7 @@ class CropLightStateNode(Node):
         self.bridge = CvBridge()
 
         # Decision parameters (adjustable during testing)
-        self.bright_pixel_threshold = 150  # pixels above this intensity are considered "bright"
+        self.bright_pixel_threshold = 130  # pixels above this intensity are considered "bright"
         self.bright_fraction_threshold = 0.35  # minimum fraction of bright pixels to classify as "sun"
 
         self.get_logger().info("CropLightStateNode (histogram-based) started.")

@@ -109,27 +109,38 @@ class GPSRowDetector(Node):
                     best_section, best_row = section, row_name
                     best_dist_from_N = dist_from_N
 
-        # 2️⃣ Ajustar fila real según dirección
+        # 2️⃣ Determine direction and working row
         direction = "unknown"
-        real_row = best_row
-        if self.last_row == (best_section, best_row) and self.last_dist_from_N is not None:
-            if best_dist_from_N > self.last_dist_from_N:
-                direction = "North → South"
-                row_num = int(best_row.split('-')[0].replace('row',''))
-                if row_num % 2 == 0:
-                    real_row = f"row{row_num-1}-{row_num}"
-            elif best_dist_from_N < self.last_dist_from_N:
-                direction = "South → North"
-                row_num = int(best_row.split('-')[0].replace('row',''))
-                if row_num % 2 == 1:
-                    real_row = f"row{row_num+1}-{row_num+2}"
+        final_row_str = best_row
+
+        # Determine direction of travel by comparing distance from the North marker
+        if self.last_row == (best_section, best_row) and self.last_dist_from_N is not None and abs(best_dist_from_N - self.last_dist_from_N) > 0.01: # Threshold for movement
+            try:
+                # The robot is between two rows, e.g., 'row1-2'.
+                # Based on direction, we decide which row is being worked on.
+                row_parts = best_row.replace('row', '').split('-')
+                if len(row_parts) == 2:
+                    row_num1 = int(row_parts[0])
+                    row_num2 = int(row_parts[1])
+
+                    if best_dist_from_N > self.last_dist_from_N:
+                        direction = "North → South"
+                        # Moving N->S, so we are working on the 'left' row (the first number in 'row1-2')
+                        final_row_str = f"row{row_num1}"
+                    elif best_dist_from_N < self.last_dist_from_N:
+                        direction = "South → North"
+                        # Moving S->N, so we are working on the 'right' row (the second number in 'row1-2')
+                        final_row_str = f"row{row_num2}"
+            except (ValueError, IndexError):
+                # If parsing the row name fails, default to the detected corridor name
+                pass
 
         self.last_dist_from_N, self.last_row = best_dist_from_N, (best_section, best_row)
 
         # 3️⃣ Publicar información
         info_str = (
             f"section: {best_section}, "
-            f"row: {real_row}, "
+            f"row: {final_row_str}, "
             f"position_from_N: {best_dist_from_N:.2f} m, "
             f"direction: {direction}"
         )
