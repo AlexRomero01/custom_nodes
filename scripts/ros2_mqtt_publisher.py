@@ -133,8 +133,10 @@ class ros2_mqtt_publisher_t(Node):
         self.create_subscription(PointStamped, ROS2_TOPIC_UTM_BASELINK, self.utm_baselink_callback, 10)
 
     # ------------------- ROS2 → MQTT publishing -------------------
-    def publish(self, topic: str, data: dict, qos: int = 1):
-        data["ts"] = int(time.time())
+    def publish(self, topic: str, data: dict, qos: int = 1, ts: int = None):
+        if ts is None:
+            ts = self.get_clock().now().to_msg().sec
+        data["ts"] = ts
         payload = json.dumps(data)
 
         # --- Save to CSV locally ---
@@ -196,7 +198,7 @@ class ros2_mqtt_publisher_t(Node):
 
 
     def save_message_locally(self, topic: str, payload: str):
-        timestamp = int(time.time())
+        timestamp = self.get_clock().now().to_msg().sec
         entry = {"topic": topic, "payload": payload, "ts": timestamp}
         with open("pending_messages.jsonl", "a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -238,7 +240,7 @@ class ros2_mqtt_publisher_t(Node):
             "status": msg.status.status,
             "service": msg.status.service
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
         self.check_pending()
 
 
@@ -267,7 +269,7 @@ class ros2_mqtt_publisher_t(Node):
             self.temperature_data[obj_id] = {
                 "canopy_temperature": temp,
                 "cwsi": cwsi,
-                "timestamp": int(time.time())
+                "timestamp": self.get_clock().now().to_msg().sec
             }
 
             # Construir lista de todos los objetos activos
@@ -335,7 +337,7 @@ class ros2_mqtt_publisher_t(Node):
                 "msg_type": "heading",
                 "heading_deg": yaw_deg
             }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+            self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
             self.check_pending()
         except Exception as e:
             self.get_logger().warn(f"Failed to compute heading: {e}")
@@ -415,7 +417,7 @@ class ros2_mqtt_publisher_t(Node):
             "msg_type": "ambient_temperature",
             "ambient_temperature": msg.temperature
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
         self.check_pending()
 
 
@@ -425,7 +427,7 @@ class ros2_mqtt_publisher_t(Node):
             "msg_type": "relative_humidity",
             "relative_humidity": msg.relative_humidity
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
         self.check_pending()
 
 
@@ -434,7 +436,7 @@ class ros2_mqtt_publisher_t(Node):
             "msg_type": "absolute_humidity",
             "absolute_humidity": msg.temperature
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
         self.check_pending()
 
 
@@ -444,7 +446,7 @@ class ros2_mqtt_publisher_t(Node):
             "msg_type": "dew_point",
             "dew_point": msg.temperature
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
         self.check_pending()
 
 
@@ -455,7 +457,7 @@ class ros2_mqtt_publisher_t(Node):
             "y": msg.point.y,
             "z": msg.point.z
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
+        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
         self.check_pending()
 
 
