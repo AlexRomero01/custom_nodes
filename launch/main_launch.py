@@ -159,7 +159,7 @@ def generate_launch_description():
 
     # --- NDVI Node ---
     ndvi_node_process = ExecuteProcess(
-        cmd=['xterm', '-e', 'python3', '~/sensors_ws/src/ndvi_sensor/scripts/ndvi_sensor_node.py'],
+        cmd=['xterm', '-e', 'python3', os.path.expanduser('~/sensors_ws/src/ndvi_sensor/scripts/ndvi_sensor_node.py')],
         output='screen',
         shell=True
     )
@@ -167,7 +167,7 @@ def generate_launch_description():
 
     # --- MQTT Publisher Node ---
     mqtt_node_process = ExecuteProcess(
-        cmd=['xterm', '-e', 'python3', '~/sensors_ws/src/custom_nodes/scripts/ros2_mqtt_publisher.py'],
+        cmd=['xterm', '-e', 'python3', os.path.expanduser('~/sensors_ws/src/custom_nodes/scripts/ros2_mqtt_publisher.py')],
         output='screen',
         shell=True
     )
@@ -183,7 +183,7 @@ def generate_launch_description():
 
     # --- UTM → base_link TF Publisher ---
     utm_base_link_node = ExecuteProcess(
-        cmd=['xterm', '-e', 'python3', '~/sensors_ws/src/custom_nodes/scripts/utm_base_link_xy.py'],
+        cmd=['xterm', '-e', 'python3', os.path.expanduser('~/sensors_ws/src/custom_nodes/scripts/utm_base_link_xy.py')],
         output='screen',
         shell=True
     )

@@ -1,14 +1,21 @@
 import rclpy
+import os
+import argparse
+import cv2
+import numpy as np
+try:
+    from ultralytics_ros.msg import YoloResult
+except Exception:
+    YoloResult = None
+    # will log later and skip YOLO subscription
+try:
+    from cv_bridge import CvBridge
+except Exception:
+    CvBridge = None
+
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from ultralytics_ros.msg import YoloResult
-import cv2
-from cv_bridge import CvBridge
-import numpy as np
-import os
-import argparse
-import time
 
 class Calculator(Node):
     def __init__(self):
@@ -23,10 +30,17 @@ class Calculator(Node):
         self.log_file.write("Process Time Logs:\n")
 
         # Suscriptores para los tópicos
+        self.bridge = CvBridge() if CvBridge is not None else None
+        if self.bridge is None:
+            self.get_logger().error("cv_bridge not available. Install cv_bridge or fix NumPy ABI. Node will run but image processing is disabled.")
+
         self.rgb_subscriber = self.create_subscription(Image, '/camera/camera/color/image_raw', self.rgb_callback, 10)
         self.thermal_subscriber = self.create_subscription(Image, '/thermal_image_view', self.thermal_callback, 10)
         self.temperature_sub = self.create_subscription(Image, '/thermal_image', self.temperature_callback, 10)
-        self.yolo_subscriber = self.create_subscription(YoloResult, '/yolo_result', self.yolo_callback, 10)
+        if YoloResult is not None:
+            self.yolo_subscriber = self.create_subscription(YoloResult, '/yolo_result', self.yolo_callback, 10)
+        else:
+            self.get_logger().warning("ultralytics_ros.msg.YoloResult not available — YOLO processing disabled.")
 
         # Publicadores bajo el tópico general 'Temperature_and_CSWI'
         base_topic = 'Temperature_and_CSWI'
@@ -35,8 +49,17 @@ class Calculator(Node):
         self.rescaled_masks_publisher = self.create_publisher(Image, f'/{base_topic}/rescaled_yolo_masks', 10)
         self.masked_image_with_temperature_publisher = self.create_publisher(Image, f'/{base_topic}/masked_image_with_temperature', 10)
 
+        # Fallback: subscribe to combined rescaled masks and split into connected components
+        # This lets us compute per-object area even if ultralytics_ros/YoloResult is not available.
+        self.combined_mask_subscriber = self.create_subscription(
+            Image,
+            f'/{base_topic}/rescaled_yolo_masks',
+            self.combined_mask_callback,
+            10
+        )
+
         # Utilidad para convertir entre ROS Image y OpenCV Image
-        self.bridge = CvBridge()
+        # self.bridge = CvBridge()  # bridge already set above
 
         self.H = None  # Homography matrix
 
@@ -93,6 +116,12 @@ class Calculator(Node):
 
 
     def yolo_callback(self, msg):
+        if YoloResult is None:
+            self.get_logger().warn("Received YOLO message but ultralytics_ros not available; skipping.")
+            return
+        if self.bridge is None:
+            self.get_logger().warn("cv_bridge not available; cannot process YOLO masks.")
+            return
         self.process_and_publish_yolo_masks(msg)
     
     def process_images(self):
@@ -130,20 +159,18 @@ class Calculator(Node):
                     rescaled_mask = cv2.warpPerspective(yolo_mask, self.H, (width, height))
 
                     # Calcular el área de la máscara reescalada
-                    mask_area = np.count_nonzero(rescaled_mask)
-                    image_area = self.rgb_rescaled.shape[0] * self.rgb_rescaled.shape[1]
-
-                    # Ignorar máscaras que sean más pequeñas del 10% del área total de la imagen reescalada
-                    # if mask_area < 0.001 * image_area:
-                    #     self.get_logger().info(f"Mask {i} is too small and will be ignored.")
-                    #     continue
+                    # count non-zero pixels (works whether mask uses 255 or other nonzero)
+                    mask_area = np.count_nonzero(rescaled_mask > 0)
+                    image_area = float(self.rgb_rescaled.shape[0] * self.rgb_rescaled.shape[1])
+                    percentage = (mask_area / image_area) * 100.0 
 
                     if self.is_mask_within_bounds(rescaled_mask, width, height):
                         temperature = self.calculate_mask_temperature(rescaled_mask)
                         if temperature != 0.0:
                             cwsi = (temperature - self.Twet) / (self.Tdry - self.Twet)
                             color = (128, 0, 128)  # Morado para todas las máscaras
-                            person_temperatures.append((rescaled_mask, temperature, cwsi, color))
+                            # store percentage with temperature and cwsi
+                            person_temperatures.append((rescaled_mask, temperature, cwsi, color, percentage))
                             
                             # Si no hay una máscara combinada, inicializarla con la primera
                             if combined_mask is None:
@@ -160,18 +187,16 @@ class Calculator(Node):
 
             if person_temperatures:
                 image_with_temperatures = self.rgb_rescaled.copy()
-                for mask, temp, cwsi, color in person_temperatures:
+                for mask, temp, cwsi, color, percentage in person_temperatures:
                     self.add_temperature_and_cwsi_to_image(image_with_temperatures, mask, temp, cwsi, color)
 
                 #self.get_logger().info("Publishing image with temperatures and CSWI")
                 masked_image_msg = self.bridge.cv2_to_imgmsg(image_with_temperatures, encoding="bgr8")
                 self.masked_image_with_temperature_publisher.publish(masked_image_msg)
 
-                for idx, (temp, cwsi) in enumerate([(p[1], p[2]) for p in person_temperatures]):
-                    msg_text = String()
-                    msg_text.data = f" Objeto {idx + 1}: Temperatura = {temp:.2f} °C, CSWI = {cwsi:.2f}"
-                    self.text_publisher.publish(msg_text)
-                    self.get_logger().info(f"Objeto {idx + 1}: Temperatura = {temp:.2f} °C, CSWI = {cwsi:.2f}")
+                # publish text including Area numeric value (no percent sign)
+                for idx, (mask, temp, cwsi, color, percentage) in enumerate(person_temperatures):
+                    self._publish_object_text(idx, temp, cwsi, mask=mask, area=percentage)
 
 
     def add_temperature_and_cwsi_to_image(self, image, mask, temperature, cwsi, color):
@@ -227,6 +252,89 @@ class Calculator(Node):
         # Cerrar archivo de log
         self.log_file.close
         super().destroy_node()
+
+    def combined_mask_callback(self, msg):
+        """Fallback: split combined rescaled mask into connected components and publish per-object text (with Area)."""
+        if self.rgb_rescaled is None:
+            self.get_logger().warn("RGB rescaled image is not available yet (combined_mask_callback).")
+            return
+        if self.thermal_image is None or self.thermal_temperature_image is None:
+            self.get_logger().warn("Thermal image/temperature not available yet (combined_mask_callback).")
+            return
+
+        # Convert mask image to OpenCV mono8
+        try:
+            combined_mask = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        except Exception as e:
+            self.get_logger().warn(f"Failed to convert combined mask msg: {e}")
+            return
+
+        # Binary threshold (any non-zero pixel belongs to an object)
+        binary = (combined_mask > 0).astype('uint8') * 255
+
+        # Connected components to separate objects
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if num_labels <= 1:
+            # no objects found
+            return
+
+        image_area = float(self.rgb_rescaled.shape[0] * self.rgb_rescaled.shape[1])
+        person_infos = []
+        for label in range(1, num_labels):
+            comp_mask = (labels == label).astype('uint8')
+            mask_area = int(np.count_nonzero(comp_mask))
+            if mask_area == 0:
+                continue
+            percentage = (mask_area / image_area) * 100.0
+
+            # convert to same format as other functions expect (255-based mask)
+            mask_255 = (comp_mask * 255).astype('uint8')
+
+            # Compute temperature for this component
+            temperature = self.calculate_mask_temperature(mask_255)
+            if temperature == 0.0:
+                # skip if no valid temperature pixels
+                continue
+            cwsi = (temperature - self.Twet) / (self.Tdry - self.Twet)
+            color = (128, 0, 128)
+            person_infos.append((mask_255, temperature, cwsi, color, percentage))
+
+        if not person_infos:
+            return
+
+        # Build and publish masked image (visual)
+        image_with_temperatures = self.rgb_rescaled.copy()
+        for mask, temp, cwsi, color, percentage in person_infos:
+            self.add_temperature_and_cwsi_to_image(image_with_temperatures, mask, temp, cwsi, color)
+        try:
+            masked_image_msg = self.bridge.cv2_to_imgmsg(image_with_temperatures, encoding="bgr8")
+            self.masked_image_with_temperature_publisher.publish(masked_image_msg)
+        except Exception:
+            pass
+
+        # Publish per-object text including Area
+        for idx, (mask, temp, cwsi, color, percentage) in enumerate(person_infos):
+            self._publish_object_text(idx, temp, cwsi, mask=mask, area=percentage)
+
+
+    def _publish_object_text(self, idx, temperature, cwsi, mask=None, area=None):
+        """Publish one text message for an object; compute area from mask if needed."""
+        if area is None and mask is not None and self.rgb_rescaled is not None:
+            try:
+                mask_area = int(np.count_nonzero(mask > 0))
+                image_area = float(self.rgb_rescaled.shape[0] * self.rgb_rescaled.shape[1])
+                area = (mask_area / image_area) * 100.0 if image_area > 0 else 0.0
+            except Exception:
+                area = 0.0
+
+        if area is None:
+            area = 0.0
+
+        msg_text = String()
+        msg_text.data = f" Objeto {idx + 1}: Temperatura = {temperature:.2f} °C, CSWI = {cwsi:.2f}, Area = {area:.2f}"
+        self.text_publisher.publish(msg_text)
+        self.get_logger().info(f"Objeto {idx + 1}: Temperatura = {temperature:.2f} °C, CSWI = {cwsi:.2f}, Area = {area:.2f}")
+
 
 def main(args=None):
     # Parsear los argumentos de la línea de comandos

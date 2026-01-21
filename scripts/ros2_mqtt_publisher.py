@@ -247,36 +247,43 @@ class ros2_mqtt_publisher_t(Node):
     def temperature_callback(self, msg: String) -> None:
         """
         Procesa datos de temperatura y CWSI de múltiples objetos detectados.
-        Cada mensaje tiene formato: 'Objeto N: Temperatura = XX.XX °C, CSWI = X.XX'
+        Cada mensaje tiene formato: 'Objeto N: Temperatura = XX.XX °C, CSWI = X.XX[, Area = YY.YY]'
         El nodo mantiene un buffer de los últimos valores por objeto.
         """
         if not hasattr(self, "temperature_data"):
             self.temperature_data = {}  # inicializa si no existe
 
         try:
-            # Extraer datos con regex robusto
-            match = re.search(r'Objeto\s*(\d+).*?Temperatura\s*=\s*(-?[\d.]+).*?CSWI\s*=\s*(-?[\d.]+)', msg.data)
+            # Regex: capture object id, temp, cwsi, optional area
+            match = re.search(r'Objeto\s*(\d+).*?Temperatura\s*=\s*(-?[\d.]+).*?CSWI\s*=\s*(-?[\d.]+)(?:.*?Area\s*=\s*(-?[\d.]+))?', msg.data)
             if not match:
                 self.get_logger().warn(f"Temperature format not recognized : {msg.data}")
                 return
 
-            obj_id, temp, cwsi = match.groups()
+            obj_id, temp, cwsi, area = match.groups()
             obj_id = f"Objeto_{obj_id.strip()}"
             temp = float(temp)
             cwsi = float(cwsi)
+            area_val = float(area) if area is not None else None
 
             # Actualizar o agregar objeto
-            self.temperature_data[obj_id] = {
+            entry = {
                 "canopy_temperature": temp,
                 "cwsi": cwsi,
                 "timestamp": self.get_clock().now().to_msg().sec
             }
+            if area_val is not None:
+                entry["area"] = area_val
 
-            # Construir lista de todos los objetos activos
-            all_objects = [
-                {"id": k, "canopy_temperature": v["canopy_temperature"], "cwsi": v["cwsi"]}
-                for k, v in self.temperature_data.items()
-            ]
+            self.temperature_data[obj_id] = entry
+
+            # Construir lista de todos los objetos activos (include area if present)
+            all_objects = []
+            for k, v in self.temperature_data.items():
+                obj = {"id": k, "canopy_temperature": v["canopy_temperature"], "cwsi": v["cwsi"]}
+                if "area" in v:
+                    obj["area"] = v["area"]
+                all_objects.append(obj)
 
             # Publicar en MQTT
             sanitized = {
@@ -286,7 +293,7 @@ class ros2_mqtt_publisher_t(Node):
             }
             self.publish(MQTT_GLOBAL_TOPIC, sanitized)
 
-            # Actualizar CSV con promedios
+            # Actualizar CSV con promedios (area skipped)
             avg_temp = sum(o["canopy_temperature"] for o in all_objects) / len(all_objects)
             avg_cwsi = sum(o["cwsi"] for o in all_objects) / len(all_objects)
             self.latest_row["temperature_canopy"] = round(avg_temp, 3)
@@ -465,7 +472,7 @@ class ros2_mqtt_publisher_t(Node):
 # ------------------- Main -------------------
 def main(args=None):
     rclpy.init(args=args)
-    node = ros2_mqtt_publisher_t("localhost", 1883)
+    node = ros2_mqtt_publisher_t("147.83.52.40", 1883)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
