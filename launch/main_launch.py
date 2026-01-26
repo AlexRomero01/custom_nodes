@@ -135,16 +135,16 @@ def generate_launch_description():
     )
     delay_crop_light_state_node = TimerAction(period=6.0, actions=[crop_light_state_node])
 
-    # --- Biomass Node ---
-    biomass_node = ExecuteProcess(
-        cmd=[
-            'xterm', '-e', 'python3',
-            os.path.expanduser('~/sensors_ws/src/custom_nodes/scripts/biomass_node.py')
-        ],
-        output='screen',
-        shell=True
-    )
-    delay_biomass_node = TimerAction(period=6.0, actions=[biomass_node])
+    # # --- Biomass Node ---
+    # biomass_node = ExecuteProcess(
+    #     cmd=[
+    #         'xterm', '-e', 'python3',
+    #         os.path.expanduser('~/sensors_ws/src/custom_nodes/scripts/biomass_node.py')
+    #     ],
+    #     output='screen',
+    #     shell=True
+    # )
+    # delay_biomass_node = TimerAction(period=6.0, actions=[biomass_node])
 
     # --- Higrometer Node ---
     higrometer_node = ExecuteProcess(
@@ -213,7 +213,7 @@ def generate_launch_description():
         delay_area_node,
         delay_ndvi_node,
         delay_crop_light_state_node,
-        delay_biomass_node,
+        # delay_biomass_node,
         delay_higrometer_node,
         conditional_mqtt_launch,
         delay_utm_node

@@ -164,6 +164,10 @@ class Calculator(Node):
                     image_area = float(self.rgb_rescaled.shape[0] * self.rgb_rescaled.shape[1])
                     percentage = (mask_area / image_area) * 100.0 
 
+                    # Filter out small detections (area < 1%)
+                    if percentage < 1.0:
+                        continue
+
                     if self.is_mask_within_bounds(rescaled_mask, width, height):
                         temperature = self.calculate_mask_temperature(rescaled_mask)
                         if temperature != 0.0:
@@ -286,6 +290,10 @@ class Calculator(Node):
             if mask_area == 0:
                 continue
             percentage = (mask_area / image_area) * 100.0
+
+            # Filter out small detections (area < 1%)
+            if percentage < 1.0:
+                continue
 
             # convert to same format as other functions expect (255-based mask)
             mask_255 = (comp_mask * 255).astype('uint8')

@@ -2,7 +2,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
-import cv2
 from cv_bridge import CvBridge
 import numpy as np
 
@@ -24,23 +23,36 @@ class AreaSegmentNode(Node):
             10
         )
 
-        self.get_logger().info("AreaSegmentNode started, listening to /rescaled_yolo_masks")
+        self.get_logger().info("AreaSegmentNode started, listening to /Temperature_and_CSWI/rescaled_yolo_masks")
 
     def mask_callback(self, msg):
-        # Convertimos la máscara a OpenCV
-        cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        """
+        Calculate real plant coverage percentage from combined mask.
+        This avoids double-counting overlapping segmentations.
+        """
+        try:
+            # Convert mask to OpenCV
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
 
-        total_pixels = cv_image.shape[0] * cv_image.shape[1]
-        segmented_pixels = np.count_nonzero(cv_image == 255)  # suponiendo binaria
+            # Count unique pixels where any plant is detected (no double counting)
+            segmented_pixels = np.count_nonzero(cv_image > 0)
+            total_pixels = float(cv_image.shape[0] * cv_image.shape[1])
+            
+            # Calculate percentage of plant coverage
+            percentage = (segmented_pixels / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+            
+            # Cap at 100% to handle any edge cases
+            percentage = min(percentage, 100.0)
 
-        percentage = (segmented_pixels / total_pixels) * 100.0
+            msg_out = Float32()
+            msg_out.data = percentage
 
-        msg_out = Float32()
-        msg_out.data = percentage
+            self.publisher.publish(msg_out)
 
-        self.publisher.publish(msg_out)
-
-        self.get_logger().info(f"Segmented area: {percentage:.2f}%")
+            self.get_logger().info(f"Plant coverage: {percentage:.2f}%")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error processing mask: {e}")
 
 def main(args=None):
     rclpy.init(args=args)

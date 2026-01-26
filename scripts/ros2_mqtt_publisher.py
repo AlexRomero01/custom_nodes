@@ -13,14 +13,14 @@ from sensor_msgs.msg import NavSatFix, Imu
 from std_msgs.msg import String, Float32
 from sensor_msgs.msg import Temperature, RelativeHumidity
 from geometry_msgs.msg import PointStamped
-from tf2_msgs.msg import TFMessage
 
-# MQTT broker configuration
-MQTT_DEFAULT_HOST = "localhost"  
+# Configuraciones
+MQTT_DEFAULT_HOST = "147.83.52.40"  
 MQTT_DEFAULT_PORT = 1883         
 MQTT_DEFAULT_TIMEOUT = 120       
+PUBLISH_RATE_HZ = 2.0  # Frecuencia de envío a MQTT (2 veces por segundo)
 
-# ROS2 topics to subscribe to
+# Topics ROS2
 ROS2_TOPIC_GPS = "gps/fix"
 ROS2_TOPIC_TEMPERATURE = "/Temperature_and_CSWI/text"
 ROS2_TOPIC_NDVI = "/NDVI"
@@ -36,38 +36,46 @@ ROS2_TOPIC_ABSOLUTE_HUMIDITY = 'pce_p18/abs_humidity'
 ROS2_TOPIC_DEW_POINT = 'pce_p18/dew_point'
 ROS2_TOPIC_UTM_BASELINK = '/tf_utm_baselink'
 
-# MQTT global topic
 MQTT_GLOBAL_TOPIC = "mqtt/global"
 
-# Regex
-GET_FLOAT_NUMBER = r'\d+\.\d+'
-GET_TEMPERATURE_DATA = rf'([^\":]+):|({GET_FLOAT_NUMBER})'
-
-class ros2_mqtt_publisher_t(Node):
+class Ros2MqttPublisher(Node):
     def __init__(self, host=MQTT_DEFAULT_HOST, port=MQTT_DEFAULT_PORT):
         super().__init__('ros2_mqtt_publisher')
 
-        # MQTT setup
-        self.is_connected = False
-        self.pending_messages = {}
+        # --- MQTT Setup ---
         self.mqtt_client = mqtt.Client()
         self.mqtt_client.on_connect = self.on_server_connection
         self.mqtt_client.on_disconnect = self.on_disconnect
-        self.mqtt_client.on_publish = self.on_publish
-
+        
         try:
             self.mqtt_client.connect(host, port, MQTT_DEFAULT_TIMEOUT)
+            self.mqtt_client.loop_start() 
         except Exception as e:
             self.get_logger().error(f"Failed to connect to MQTT broker: {e}")
 
-        # Start MQTT loop
-        self.mqtt_client.loop_start()
+        self.is_connected = False
 
-        # Subscribe to mqtt/global for logging
-        self.mqtt_client.message_callback_add(MQTT_GLOBAL_TOPIC, self.mqtt_global_callback)
-        self.mqtt_client.subscribe(MQTT_GLOBAL_TOPIC, qos=1)
+        # --- Data Buffers ---
+        self.latest_data = {
+            "gps": None,
+            "temperature": None,
+            "ndvi": None,
+            "heading": None,
+            "area": None,
+            "location": None,
+            "biomass": None,
+            "light_state": None,
+            "crop_type": None,
+            "ambient_temperature": None,
+            "relative_humidity": None,
+            "absolute_humidity": None,
+            "dew_point": None,
+            "tf_position": None
+        }
 
-        # CSV setup
+        self.detected_plants = {} 
+
+        # --- CSV Setup ---
         home = os.path.expanduser("~/sensors_ws/data_collection")
         os.makedirs(home, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -81,45 +89,32 @@ class ros2_mqtt_publisher_t(Node):
             "ambient_temperature","relative_humidity","absolute_humidity", "dew_point",
             "tf_utm_baselink_X","tf_utm_baselink_Y"
         ]
-        self.latest_row = {k: "" for k in self.csv_fields}
-
+        
         with open(self.csv_file, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=self.csv_fields)
-            writer.writeheader()
+            csv.DictWriter(f, fieldnames=self.csv_fields).writeheader()
 
-        # ROS2 subscriptions (optional, only if you still want them for MQTT publishing)
+        # --- ROS2 Subscriptions ---
         self.subscribe_to_topics()
 
-    # ------------------- MQTT callbacks -------------------
+        # --- TIMER ---
+        self.create_timer(1.0 / PUBLISH_RATE_HZ, self.publish_cycle)
+
     def on_server_connection(self, client, userdata, flags, rc):
         if rc == 0:
             self.get_logger().info("Connected to MQTT broker.")
             self.is_connected = True
-            self.resend_local_backups()
         else:
-            self.get_logger().error(f"Connection failed with result code={rc}")
-            self.is_connected = False
+            self.get_logger().error(f"Connection failed code={rc}")
 
     def on_disconnect(self, client, userdata, rc):
-        self.get_logger().warn("Disconnected from MQTT broker.")
+        self.get_logger().warn("Disconnected from MQTT.")
         self.is_connected = False
 
-    def on_publish(self, client, userdata, mid):
-        if mid in self.pending_messages:
-            del self.pending_messages[mid]
-
-    # ------------------- MQTT global logging -------------------
-    def mqtt_global_callback(self, client, userdata, msg):
-        payload = msg.payload.decode()  # bytes → str
-        self.get_logger().info(f"Received from mqtt/global: {payload}")
-
-
-    # ------------------- ROS2 subscriptions -------------------
     def subscribe_to_topics(self):
         qos = QoSProfile(depth=10)
         self.create_subscription(NavSatFix, ROS2_TOPIC_GPS, self.gps_callback, qos)
         self.create_subscription(String, ROS2_TOPIC_TEMPERATURE, self.temperature_callback, qos)
-        self.create_subscription(String, ROS2_TOPIC_NDVI, self.ndvi_callback, qos)  
+        self.create_subscription(String, ROS2_TOPIC_NDVI, self.ndvi_callback, qos)
         self.create_subscription(Imu, ROS2_TOPIC_HEADING, self.heading_callback, 10)
         self.create_subscription(Float32, ROS2_TOPIC_AREA, self.area_callback, 10)
         self.create_subscription(String, ROS2_TOPIC_LOCATION, self.location_callback, 10)
@@ -132,353 +127,163 @@ class ros2_mqtt_publisher_t(Node):
         self.create_subscription(Temperature, ROS2_TOPIC_DEW_POINT, self.dew_point_callback, 10)
         self.create_subscription(PointStamped, ROS2_TOPIC_UTM_BASELINK, self.utm_baselink_callback, 10)
 
-    # ------------------- ROS2 → MQTT publishing -------------------
-    def publish(self, topic: str, data: dict, qos: int = 1, ts: int = None):
-        if ts is None:
-            ts = self.get_clock().now().to_msg().sec
-        data["ts"] = ts
-        payload = json.dumps(data)
+    # ================= Callbacks (Solo guardan datos) =================
 
-        # --- Save to CSV locally ---
-        self.latest_row["ts"] = data["ts"]
-
-        if data["msg_type"] == "gps":
-            self.latest_row["gps_lat"] = data.get("latitude", "")
-            self.latest_row["gps_lon"] = data.get("longitude", "")
-            self.latest_row["gps_alt"] = data.get("altitude", "")
-            self.latest_row["gps_status"] = data.get("status", "")
-            self.latest_row["gps_service"] = data.get("service", "")
-        elif data["msg_type"] == "temperature":
-            self.latest_row["temperature_canopy"] = data.get("canopy_temperature", "")
-            self.latest_row["temperature_cwsi"] = data.get("cwsi", "")
-        elif data["msg_type"] == "ndvi":
-                    self.latest_row["ndvi"] = data.get("ndvi", "")
-                    self.latest_row["ndvi3d"] = data.get("ndvi3d", "")     
-                    self.latest_row["ndvi_ir"] = data.get("ndvi_ir", "")     
-                    self.latest_row["ndvi_visible"] = data.get("ndvi_visible", "") 
-        elif data["msg_type"] == "heading":
-            self.latest_row["heading_deg"] = data.get("heading_deg", "")
-        elif data["msg_type"] == "area":
-            self.latest_row["area"] = data.get("area", "")
-        elif data["msg_type"] == "location":
-            self.latest_row["location"] = data.get("location", "")
-        elif data["msg_type"] == "biomass":
-            self.latest_row["biomass"] = data.get("biomass", "")
-        elif data["msg_type"] == "light_state":
-            self.latest_row["crop_light_state"] = data.get("crop_light_state", "")
-        elif data["msg_type"] == "crop_type":
-            self.latest_row["crop_type"] = data.get("crop_type", "")
-        elif data["msg_type"] == "ambient_temperature":
-            self.latest_row["ambient_temperature"] = data.get("ambient_temperature", "")
-        elif data["msg_type"] == "relative_humidity":
-            self.latest_row["relative_humidity"] = data.get("relative_humidity", "")
-        elif data["msg_type"] == "absolute_humidity":
-            self.latest_row["absolute_humidity"] = data.get("absolute_humidity", "")
-        elif data["msg_type"] == "dew_point":
-            self.latest_row["dew_point"] = data.get("dew_point", "")
-        elif data["msg_type"] == "tf_position":
-            self.latest_row["tf_utm_baselink_X"] = data.get("x", "")
-            self.latest_row["tf_utm_baselink_Y"] = data.get("y", "")
-
-
-        with open(self.csv_file, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=self.csv_fields)
-            writer.writerow(self.latest_row)
-
-
-        # --- Publish to MQTT ---
-        if self.is_connected:
-            result = self.mqtt_client.publish(topic, payload, qos=qos)
-            if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                self.pending_messages[result.mid] = (topic, payload)
-            else:
-                self.save_message_locally(topic, payload)
-        else:
-            self.save_message_locally(topic, payload)
-
-
-    def save_message_locally(self, topic: str, payload: str):
-        timestamp = self.get_clock().now().to_msg().sec
-        entry = {"topic": topic, "payload": payload, "ts": timestamp}
-        with open("pending_messages.jsonl", "a") as f:
-            f.write(json.dumps(entry) + "\n")
-
-    def check_pending(self, timeout: float = 5.0):
-        start_time = time.time()
-        while time.time() - start_time < timeout and self.pending_messages:
-            time.sleep(0.1)
-        for mid, (topic, payload) in list(self.pending_messages.items()):
-            self.save_message_locally(topic, payload)
-            del self.pending_messages[mid]
-
-    def resend_local_backups(self):
-        try:
-            with open("pending_messages.jsonl", "r") as f:
-                entries = [json.loads(line) for line in f if line.strip()]
-        except FileNotFoundError:
-            return
-        entries.sort(key=lambda e: e["ts"])
-        failed = []
-        for entry in entries:
-            result = self.mqtt_client.publish(entry["topic"], entry["payload"], qos=1)
-            if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                failed.append(entry)
-        with open("pending_messages.jsonl", "w") as f:
-            for e in failed:
-                f.write(json.dumps(e) + "\n")
-
-    def gps_callback(self, msg: NavSatFix) -> None:
-        """
-        Process GPS messages, build a dict including sensor timestamp and publish timestamp, then send via MQTT.
-        """
-        sanitized = {
+    def gps_callback(self, msg: NavSatFix):
+        self.latest_data["gps"] = {
             "msg_type": "gps",
-            "sensor_ts": msg.header.stamp.sec,  # original sensor timestamp
-            "latitude": msg.latitude,
-            "longitude": msg.longitude,
-            "altitude": msg.altitude,
-            "status": msg.status.status,
-            "service": msg.status.service
+            "latitude": msg.latitude, "longitude": msg.longitude, "altitude": msg.altitude,
+            "status": msg.status.status, "service": msg.status.service
         }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-        self.check_pending()
 
-
-    def temperature_callback(self, msg: String) -> None:
-        """
-        Procesa datos de temperatura y CWSI de múltiples objetos detectados.
-        Cada mensaje tiene formato: 'Objeto N: Temperatura = XX.XX °C, CSWI = X.XX[, Area = YY.YY]'
-        El nodo mantiene un buffer de los últimos valores por objeto.
-        """
-        if not hasattr(self, "temperature_data"):
-            self.temperature_data = {}  # inicializa si no existe
-
+    def temperature_callback(self, msg: String):
         try:
-            # Regex: capture object id, temp, cwsi, optional area
             match = re.search(r'Objeto\s*(\d+).*?Temperatura\s*=\s*(-?[\d.]+).*?CSWI\s*=\s*(-?[\d.]+)(?:.*?Area\s*=\s*(-?[\d.]+))?', msg.data)
-            if not match:
-                self.get_logger().warn(f"Temperature format not recognized : {msg.data}")
-                return
+            if match:
+                obj_id, temp, cwsi, area = match.groups()
+                entry = {
+                    "id": f"Objeto_{obj_id.strip()}",
+                    "canopy_temperature": float(temp),
+                    "cwsi": float(cwsi)
+                }
+                if area:
+                    entry["area"] = float(area)
+                
+                self.detected_plants[entry["id"]] = entry
 
-            obj_id, temp, cwsi, area = match.groups()
-            obj_id = f"Objeto_{obj_id.strip()}"
-            temp = float(temp)
-            cwsi = float(cwsi)
-            area_val = float(area) if area is not None else None
-
-            # Actualizar o agregar objeto
-            entry = {
-                "canopy_temperature": temp,
-                "cwsi": cwsi,
-                "timestamp": self.get_clock().now().to_msg().sec
-            }
-            if area_val is not None:
-                entry["area"] = area_val
-
-            self.temperature_data[obj_id] = entry
-
-            # Construir lista de todos los objetos activos (include area if present)
-            all_objects = []
-            for k, v in self.temperature_data.items():
-                obj = {"id": k, "canopy_temperature": v["canopy_temperature"], "cwsi": v["cwsi"]}
-                if "area" in v:
-                    obj["area"] = v["area"]
-                all_objects.append(obj)
-
-            # Publicar en MQTT
-            sanitized = {
-                "msg_type": "temperature",
-                "entity_count": len(all_objects),
-                "plants": all_objects
-            }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-
-            # Actualizar CSV con promedios (area skipped)
-            avg_temp = sum(o["canopy_temperature"] for o in all_objects) / len(all_objects)
-            avg_cwsi = sum(o["cwsi"] for o in all_objects) / len(all_objects)
-            self.latest_row["temperature_canopy"] = round(avg_temp, 3)
-            self.latest_row["temperature_cwsi"] = round(avg_cwsi, 3)
-
-            self.check_pending()
-
-        except Exception as e:
-            self.get_logger().warn(f"Error procesando mensaje de temperatura: {e}")
-
-
+                all_objects = list(self.detected_plants.values())
+                self.latest_data["temperature"] = {
+                    "msg_type": "temperature",
+                    "entity_count": len(all_objects),
+                    "plants": all_objects,
+                    "avg_temp": sum(o["canopy_temperature"] for o in all_objects) / len(all_objects),
+                    "avg_cwsi": sum(o["cwsi"] for o in all_objects) / len(all_objects)
+                }
+        except Exception:
+            pass
 
     def ndvi_callback(self, msg: String):
-            try:
-                values = [float(v.strip()) for v in msg.data.split(',')]
-                if len(values) >= 4:
-                    sanitized = {
-                        "msg_type": "ndvi",
-                        "ndvi": values[0],
-                        "ndvi_3d": values[1],
-                        "ndvi_ir": values[2],
-                        "ndvi_visible": values[3]
-                    }
-                    self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-                    self.check_pending()
-                else:
-                    self.get_logger().warn(f"NDVI data incomplete: {msg.data}")
-            except ValueError as e:
-                self.get_logger().error(f"Failed to parse NDVI values: {e}")
-    
+        try:
+            v = [float(x.strip()) for x in msg.data.split(',')]
+            if len(v) >= 4:
+                self.latest_data["ndvi"] = {
+                    "msg_type": "ndvi", "ndvi": v[0], "ndvi3d": v[1], 
+                    "ndvi_ir": v[2], "ndvi_visible": v[3]
+                }
+        except: pass
 
     def area_callback(self, msg: Float32):
-        sanitized = {
-            "msg_type": "area",
-            "area": msg.data  
-        }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-        self.check_pending()
+        self.latest_data["area"] = {"msg_type": "area", "area": msg.data}
 
-    def heading_callback(self, msg: Imu) -> None:
-        """
-        Parse heading (yaw) from IMU orientation quaternion, sanitize, and publish.
-        """
-        self.heading_quat = msg.orientation
-        try:
-            yaw_deg = self.quaternion_to_yaw(self.heading_quat)
-            sanitized = {
-                "msg_type": "heading",
-                "heading_deg": yaw_deg
-            }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-            self.check_pending()
-        except Exception as e:
-            self.get_logger().warn(f"Failed to compute heading: {e}")
-
-    def quaternion_to_yaw(self, q):
-        """Convert quaternion to yaw in degrees"""
+    def heading_callback(self, msg: Imu):
+        q = msg.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-        return math.degrees(yaw)
-                 
-        
-    def location_callback(self, msg: String) -> None:
-        """
-        Receive location data (String), wrap into MQTT JSON, and publish.
-        """
-        try:
-            sanitized = {
-                "msg_type": "location",
-                "location": msg.data
-            }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-            self.check_pending()
-        except Exception as e:
-            self.get_logger().warn(f"Failed to process location data: {e}")
+        yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+        self.latest_data["heading"] = {"msg_type": "heading", "heading_deg": yaw}
 
+    def location_callback(self, msg: String):
+        self.latest_data["location"] = {"msg_type": "location", "location": msg.data}
+    
+    def biomass_callback(self, msg: Float32):
+        self.latest_data["biomass"] = {"msg_type": "biomass", "biomass": msg.data}
 
-    def biomass_callback(self, msg: Float32) -> None:
-        """
-        Receive biomass estimation (Float32 in m³), wrap into MQTT JSON, and publish.
-        """
-        try:
-            sanitized = {
-                "msg_type": "biomass",
-                "biomass": msg.data  
-            }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-            self.check_pending()
-        except Exception as e:
-            self.get_logger().warn(f"Failed to process biomass data: {e}")
+    def crop_light_state_callback(self, msg: String):
+        self.latest_data["light_state"] = {"msg_type": "light_state", "crop_light_state": msg.data}
 
+    def crop_type_callback(self, msg: String):
+        self.latest_data["crop_type"] = {"msg_type": "crop_type", "crop_type": msg.data}
 
-    def crop_light_state_callback(self, msg: String) -> None:
-        """
-        Receive crop light state (String: 'sun' or 'shade'), wrap into MQTT JSON, and publish.
-        """
-        try:
-            sanitized = {
-                "msg_type": "light_state",
-                "light_state": msg.data,
-                "crop_light_state": msg.data  
-            }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-            self.check_pending()
-        except Exception as e:
-            self.get_logger().warn(f"Failed to process crop light state data: {e}")
+    def ambient_temperature_callback(self, msg: Temperature):
+        self.latest_data["ambient_temperature"] = {"msg_type": "ambient_temperature", "ambient_temperature": msg.temperature}
 
+    def relative_humidity_callback(self, msg: RelativeHumidity):
+        self.latest_data["relative_humidity"] = {"msg_type": "relative_humidity", "relative_humidity": msg.relative_humidity}
 
-    def crop_type_callback(self, msg: String) -> None:
-        """
-        Receive crop type (String: 'lettuce' or 'other_crop'),
-        wrap into MQTT JSON, and publish.
-        """
-        try:
-            sanitized = {
-                "msg_type": "crop_type",
-                "crop_type": msg.data
-            }
-            self.publish(MQTT_GLOBAL_TOPIC, sanitized)
-            self.check_pending()
-        except Exception as e:
-            self.get_logger().warn(f"Failed to process crop type data: {e}")
+    def absolute_humidity_callback(self, msg: Temperature):
+        self.latest_data["absolute_humidity"] = {"msg_type": "absolute_humidity", "absolute_humidity": msg.temperature}
 
-
-    def ambient_temperature_callback(self, msg: Temperature) -> None:
-        sanitized = {
-            "msg_type": "ambient_temperature",
-            "ambient_temperature": msg.temperature
-        }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-        self.check_pending()
-
-
-
-    def relative_humidity_callback(self, msg: RelativeHumidity) -> None:
-        sanitized = {
-            "msg_type": "relative_humidity",
-            "relative_humidity": msg.relative_humidity
-        }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-        self.check_pending()
-
-
-    def absolute_humidity_callback(self, msg: Temperature) -> None:
-        sanitized = {
-            "msg_type": "absolute_humidity",
-            "absolute_humidity": msg.temperature
-        }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-        self.check_pending()
-
-
-
-    def dew_point_callback(self, msg: Temperature) -> None:
-        sanitized = {
-            "msg_type": "dew_point",
-            "dew_point": msg.temperature
-        }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-        self.check_pending()
-
+    def dew_point_callback(self, msg: Temperature):
+        self.latest_data["dew_point"] = {"msg_type": "dew_point", "dew_point": msg.temperature}
 
     def utm_baselink_callback(self, msg: PointStamped):
-        sanitized = {
-            "msg_type": "tf_position",
-            "x": msg.point.x,
-            "y": msg.point.y,
-            "z": msg.point.z
-        }
-        self.publish(MQTT_GLOBAL_TOPIC, sanitized, ts=msg.header.stamp.sec)
-        self.check_pending()
+        self.latest_data["tf_position"] = {"msg_type": "tf_position", "x": msg.point.x, "y": msg.point.y, "z": msg.point.z}
 
+    # ================= CICLO DE PUBLICACIÓN =================
 
+    def publish_cycle(self):
+        current_ts = self.get_clock().now().to_msg().sec
+        csv_row = {k: "" for k in self.csv_fields}
+        csv_row["ts"] = current_ts
 
-# ------------------- Main -------------------
+        for key, data in self.latest_data.items():
+            if data is None:
+                continue
+            
+            # 1. Update timestamp
+            data["ts"] = current_ts
+            
+            # 2. Publish MQTT & PRINT
+            payload = json.dumps(data)
+            if self.is_connected:
+                self.mqtt_client.publish(MQTT_GLOBAL_TOPIC, payload, qos=0)
+                # >>> AQUI ESTA EL PRINT <<<
+                self.get_logger().info(f"Pub MQTT [{key}]: {payload}")
+            
+            # 3. Fill CSV
+            if key == "gps":
+                csv_row["gps_lat"] = data.get("latitude")
+                csv_row["gps_lon"] = data.get("longitude")
+                csv_row["gps_alt"] = data.get("altitude")
+                csv_row["gps_status"] = data.get("status")
+                csv_row["gps_service"] = data.get("service")
+            elif key == "temperature":
+                csv_row["temperature_canopy"] = round(data.get("avg_temp", 0), 2)
+                csv_row["temperature_cwsi"] = round(data.get("avg_cwsi", 0), 2)
+            elif key == "ndvi":
+                csv_row["ndvi"] = data.get("ndvi")
+                csv_row["ndvi3d"] = data.get("ndvi3d")
+                csv_row["ndvi_ir"] = data.get("ndvi_ir")
+                csv_row["ndvi_visible"] = data.get("ndvi_visible")
+            elif key == "heading":
+                csv_row["heading_deg"] = data.get("heading_deg")
+            elif key == "area":
+                csv_row["area"] = data.get("area")
+            elif key == "location":
+                csv_row["location"] = data.get("location")
+            elif key == "biomass":
+                csv_row["biomass"] = data.get("biomass")
+            elif key == "light_state":
+                csv_row["crop_light_state"] = data.get("crop_light_state")
+            elif key == "crop_type":
+                csv_row["crop_type"] = data.get("crop_type")
+            elif key == "ambient_temperature":
+                csv_row["ambient_temperature"] = data.get("ambient_temperature")
+            elif key == "relative_humidity":
+                csv_row["relative_humidity"] = data.get("relative_humidity")
+            elif key == "absolute_humidity":
+                csv_row["absolute_humidity"] = data.get("absolute_humidity")
+            elif key == "dew_point":
+                csv_row["dew_point"] = data.get("dew_point")
+            elif key == "tf_position":
+                csv_row["tf_utm_baselink_X"] = data.get("x")
+                csv_row["tf_utm_baselink_Y"] = data.get("y")
+
+        try:
+            with open(self.csv_file, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=self.csv_fields)
+                writer.writerow(csv_row)
+        except Exception as e:
+            self.get_logger().error(f"Error writing CSV: {e}")
+
 def main(args=None):
     rclpy.init(args=args)
-    node = ros2_mqtt_publisher_t("147.83.52.40", 1883)
+    node = Ros2MqttPublisher()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.check_pending(timeout=2)
         node.mqtt_client.disconnect()
         node.destroy_node()
         rclpy.shutdown()
