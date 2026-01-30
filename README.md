@@ -44,6 +44,28 @@ For example, to launch with depth alignment and point cloud enabled, you can run
 ros2 launch custom_nodes main_launch.py align_depth:=true pointcloud_enable:=true
 ```
 
+# custom_nodes — brief handover
+
+This folder contains ROS2 processing and driver helper scripts for the project: camera drivers, YOLO processing, temperature / CWSI computation, area segmentation, biomass estimation and an MQTT bridge. Below you will find the quick reproduction steps, where to find the important scripts and how to run them.
+
+## Quick reproduction: play a rosbag (example)
+
+To reproduce a recorded run from a rosbag directory (example provided), run:
+
+bash
+```
+ros2 bag play <path_to_your_rosbag>
+```
+
+In a new terminal, source the ROS2 workspace and run the main launch file:
+
+```bash
+source install/setup.bash
+ros2 launch custom_nodes main_launch.py
+```
+
+This will replay the rosbag and launch the necessary nodes for processing.
+
 ## Scripts
 
 The `scripts` directory contains several Python scripts that implement the core functionalities of this package.
@@ -59,3 +81,81 @@ The `scripts` directory contains several Python scripts that implement the core 
 - `sun_shadow_calibration.py`: This script performs sun/shadow calibration.
 - `temperature_cswi_calculation.py`: This script calculates the Crop Water Stress Index (CWSI).
 - `utm_base_link_xy.py`: This script publishes the TF transform between the UTM and base_link frames.
+
+Notes:
+- The `--clock` flag publishes simulated /clock for nodes that use `use_sim_time`.
+- Use the path above as-is or replace with your bag directory.
+
+## Launching the workspace
+
+The main launch file is the entry point for both simulated (rosbag playback) and real-hardware runs:
+
+- To run in "rosbag / simulated time" mode (no hardware drivers; nodes use the bag's clock):
+  - ros2 launch custom_nodes main_launch.py use_sim_time:=true
+
+- To run with real hardware (drivers enabled; live sensors):
+  - ros2 launch custom_nodes main_launch.py use_sim_time:=false
+
+See the main launch file here:
+- [launch/main_launch.py](launch/main_launch.py)
+
+## Important scripts & nodes
+
+Processing, drivers and utilities live in `scripts/`. Key files:
+
+- MQTT bridge (collects many topics → MQTT + CSV): [`Ros2MqttPublisher`](scripts/ros2_mqtt_publisher.py) — [scripts/ros2_mqtt_publisher.py](scripts/ros2_mqtt_publisher.py)
+- Temperature + CWSI processing: [`Calculator`](scripts/temperature_cswi_calculation.py) — [scripts/temperature_cswi_calculation.py](scripts/temperature_cswi_calculation.py)
+- Biomass estimation node: [`BiomassNode`](scripts/biomass_node.py) — [scripts/biomass_node.py](scripts/biomass_node.py)
+- Area segmentation processing: [`AreaSegmentNode`](scripts/area_segmentation_node.py) — [scripts/area_segmentation_node.py](scripts/area_segmentation_node.py)
+- Rosbag helper / recorder: [`RosbagRecorder`](scripts/rosbag_recording.py) — [scripts/rosbag_recording.py](scripts/rosbag_recording.py)
+- UTM → base_link TF publisher: [scripts/utm_base_link_xy.py](scripts/utm_base_link_xy.py)
+
+Camera-related launch / helpers:
+- Realsense launch wrapper: [launch/launch_realsense.py](launch/launch_realsense.py)
+- Thermal camera (Optris) helper: [launch/launch_thermalcamera.py](launch/launch_thermalcamera.py)
+- RViz config used in the system: [launch/rviz2_config4.rviz](launch/rviz2_config4.rviz)
+
+GUI / Launcher utilities (local Tk GUI to start/stop processes):
+- GUI app: [launch/APP.py](launch/APP.py)
+- Generic Node launcher: [`NodeLauncher`](launch/nodos/NodeLauncher.py) — [launch/nodos/NodeLauncher.py](launch/nodos/NodeLauncher.py)
+- Thermal options UI: [`ThermalCameraOptions`](launch/nodos/ThermalCameraOptions.py) — [launch/nodos/ThermalCameraOptions.py](launch/nodos/ThermalCameraOptions.py)
+- Biomass options UI: [launch/nodos/BiomassOptions.py](launch/nodos/BiomassOptions.py)
+- Area segmentation UI: [launch/nodos/AreaSegmentationOptions.py](launch/nodos/AreaSegmentationOptions.py)
+
+Homography / calibration resources:
+- Homography files used by the processing node: [Homography/average_homography_640.txt](Homography/average_homography_640.txt), [Homography/average_homography2.txt](Homography/average_homography2.txt), and config: [Homography/config.xml](Homography/config.xml)
+
+Package metadata / build:
+- [package.xml](package.xml)
+- [CMakeLists.txt](CMakeLists.txt)
+
+## Typical workflow to "replay and process"
+
+1. Start bag playback (see the ros2 bag play command above).
+2. Launch processing stack in simulated mode so nodes consume the bag `/clock`:
+   - ros2 launch custom_nodes main_launch.py use_sim_time:=true
+3. Optional: open RViz using the included config to inspect images and pointclouds:
+   - RViz is launched automatically by the main launch; the file is [launch/rviz2_config4.rviz](launch/rviz2_config4.rviz).
+4. Inspect logs and CSV output created by the MQTT bridge at `~/sensors_ws/data_collection` (see [`Ros2MqttPublisher`](scripts/ros2_mqtt_publisher.py)).
+
+## Quick developer notes & gotchas
+
+- The main processing node that computes temperature/CWSI expects homography matrices and will load them from `Homography/` depending on RGB resolution. See [`Calculator`](scripts/temperature_cswi_calculation.py) for details.
+- The biomass estimator uses depth + color to build pointclouds (see [`BiomassNode.create_pointcloud`](scripts/biomass_node.py)).
+- The GUI launcher spawns nodes inside embedded xterm widgets; logs are redirected to `/tmp/*.log` — see [`NodeLauncher`](launch/nodos/NodeLauncher.py) and [`ThermalCameraOptions`](launch/nodos/ThermalCameraOptions.py).
+- If you play a bag and do not set `use_sim_time:=true` nodes will try to use live hardware and some drivers will be launched (optris, realsense, etc.). Use `use_sim_time:=true` for pure playback.
+
+## Where to look for common tasks
+
+- Add a new rosbag topic to be recorded / played: edit [scripts/rosbag_recording.py](scripts/rosbag_recording.py)
+- Change CSV fields or add a new sensor mapping: edit [`Ros2MqttPublisher`](scripts/ros2_mqtt_publisher.py)
+- Tune homography / calibration: [Homography/config.xml](Homography/config.xml) and homography matrix files in [Homography/](Homography/)
+- GUI tweaks: [launch/APP.py](launch/APP.py) and the set of options under [launch/nodos/](launch/nodos/)
+
+## Final notes
+
+- This README is a pragmatic summary. For detailed behavior of a node, open its script in `scripts/` (examples linked above).
+- Build/installation of the ROS package uses the top-level [CMakeLists.txt](CMakeLists.txt) and [package.xml](package.xml).
+
+Good luck. If anything in these scripts needs a short docstring added inline, add it near the relevant class/function:
+- [`BiomassNode`](scripts/biomass_node.py)
