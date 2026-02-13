@@ -112,18 +112,14 @@ def generate_launch_description():
     )
     delay_ndvi_node = TimerAction(period=6.0, actions=[ndvi_node_process])
     
-    # --- GPS Node (HARDWARE vs PROCESSING) ---
-    # Si este nodo lee USB (/dev/tty...), usa UnlessCondition.
-    # Si este nodo solo convierte coordenadas de un topic existente, quita la condición.
-    # Por seguridad, asumo que es driver y lo deshabilito en simulación (el bag ya tiene /gps/fix)
+    # --- GPS Node (Always enabled) ---
     GPS_coordinates_node = ExecuteProcess(
         cmd=[
             'xterm', '-hold', '-e', 'python3', os.path.expanduser('~/sensors_ws/src/custom_nodes/scripts/GPS_coordinates_node.py'),
             '--ros-args', '-p', ['use_sim_time:=', LaunchConfiguration('use_sim_time')]
         ],
         output='screen',
-        shell=True,
-        condition=UnlessCondition(LaunchConfiguration('use_sim_time'))
+        shell=True
     )
     delay_gps_node = TimerAction(period=6.0, actions=[GPS_coordinates_node])
 
@@ -175,6 +171,17 @@ def generate_launch_description():
         output='screen'
     )
     delay_rviz = TimerAction(period=9.0, actions=[rviz_node])
+
+    # --- CSV SafeCopy Node (Always enabled) ---
+    csv_safecopy_node = ExecuteProcess(
+        cmd=[
+            'xterm', '-hold', '-e', 'python3', os.path.expanduser('~/sensors_ws/src/custom_nodes/scripts/csv_safecopy.py'),
+            '--ros-args', '-p', ['use_sim_time:=', LaunchConfiguration('use_sim_time')]
+        ],
+        output='screen',
+        shell=True
+    )
+    delay_csv_safecopy_node = TimerAction(period=6.0, actions=[csv_safecopy_node])
 
     # --- Area Segmentation Node ---
     area_segment_node = ExecuteProcess(
@@ -255,6 +262,7 @@ def generate_launch_description():
         delay_between_launches,
         delay_py_node_2,
         delay_rviz,
+        delay_csv_safecopy_node,
         delay_area_node,
         delay_crop_light_state_node,
         conditional_mqtt_launch,

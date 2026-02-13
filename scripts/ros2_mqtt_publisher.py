@@ -1,21 +1,28 @@
+#!/usr/bin/env python3
+"""
+ROS2 MQTT Publisher Node
+========================
+Publishes sensor data to MQTT broker in real-time at 2 messages/second.
+CSV logging is handled separately by csv_safecopy.py
+"""
+
 import re
 import json
-import time 
-import paho.mqtt.client as mqtt
 import math
-import csv
 import os
+import csv
+from datetime import datetime
+import paho.mqtt.client as mqtt
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
-from datetime import datetime
 from sensor_msgs.msg import NavSatFix, Imu
 from std_msgs.msg import String, Float32
 from sensor_msgs.msg import Temperature, RelativeHumidity
 from geometry_msgs.msg import PointStamped
 
 # Configuraciones
-MQTT_DEFAULT_HOST = "147.83.52.40"  
+MQTT_DEFAULT_HOST = "192.168.13.203"  
 MQTT_DEFAULT_PORT = 1883         
 MQTT_DEFAULT_TIMEOUT = 120       
 PUBLISH_RATE_HZ = 2.0 
@@ -149,25 +156,38 @@ class Ros2MqttPublisher(Node):
         self.ensure_mqtt_connected()
 
     def temperature_callback(self, msg: String):
-        try:
-            match = re.search(r'Objeto\s*(\d+).*?Temperatura\s*=\s*(-?[\d.]+).*?CSWI\s*=\s*(-?[\d.]+)(?:.*?Area\s*=\s*(-?[\d.]+))?', msg.data)
-            if match:
-                obj_id, temp, cwsi, area = match.groups()
-                entry = {"id": f"Objeto_{obj_id.strip()}", "canopy_temperature": float(temp), "cwsi": float(cwsi)}
-                if area: entry["area"] = float(area)
-                self.detected_plants[entry["id"]] = entry
-                all_objects = list(self.detected_plants.values())
-                
-                self.latest_data["temperature"] = {
-                    "msg_type": "temperature",
-                    "ts": self.get_msg_time(msg), 
-                    "entity_count": len(all_objects),
-                    "plants": all_objects,
-                    "avg_temp": sum(o["canopy_temperature"] for o in all_objects) / len(all_objects),
-                    "avg_cwsi": sum(o["cwsi"] for o in all_objects) / len(all_objects)
-                }
-                self.ensure_mqtt_connected()
-        except: pass
+            try:
+                # 1. Parse the message
+                match = re.search(r'Objeto\s*(\d+).*?Temperatura\s*=\s*(-?[\d.]+).*?CSWI\s*=\s*(-?[\d.]+)(?:.*?Area\s*=\s*(-?[\d.]+))?', msg.data)
+                if match:
+                    obj_id, temp, cwsi, area = match.groups()
+                    current_ts = self.get_msg_time(msg)
+                    
+                    # --- NEW LOGIC: Clear old detections if this is a new frame ---
+                    # If the timestamp changes (more than a tiny jitter), it's a new camera frame.
+                    # We check against the stored timestamp in latest_data.
+                    last_temp_data = self.latest_data.get("temperature")
+                    if last_temp_data and abs(current_ts - last_temp_data["ts"]) > 0.01:
+                        self.detected_plants = {} 
+                    # --------------------------------------------------------------
+
+                    entry = {"id": f"Objeto_{obj_id.strip()}", "canopy_temperature": float(temp), "cwsi": float(cwsi)}
+                    if area: entry["area"] = float(area)
+                    
+                    self.detected_plants[entry["id"]] = entry
+                    all_objects = list(self.detected_plants.values())
+                    
+                    self.latest_data["temperature"] = {
+                        "msg_type": "temperature",
+                        "ts": current_ts, 
+                        "entity_count": len(all_objects),
+                        "plants": all_objects,
+                        "avg_temp": sum(o["canopy_temperature"] for o in all_objects) / len(all_objects),
+                        "avg_cwsi": sum(o["cwsi"] for o in all_objects) / len(all_objects)
+                    }
+                    self.ensure_mqtt_connected()
+            except Exception as e:
+                self.get_logger().error(f"Error in temperature_callback: {e}")
 
     def ndvi_callback(self, msg: String):
         try:
@@ -229,95 +249,76 @@ class Ros2MqttPublisher(Node):
         self.latest_data["tf_position"] = {"msg_type": "tf_position", "ts": self.get_msg_time(msg), "x": msg.point.x, "y": msg.point.y, "z": msg.point.z}
         self.ensure_mqtt_connected()
 
-    # ================= CICLO DE PUBLICACIÓN =================
-    # IMPORTANTE: Esta funcion debe estar IDENTADA dentro de la clase (un tabulador)
     def publish_cycle(self):
-        current_wall_time = self.get_clock().now().to_msg().sec
-        
-        # --- PROTECCIÓN INICIAL (FIX para Rosbag/Launch) ---
-        if current_wall_time == 0:
-            return
+            # 1. Get current time for the CSV row
+            now = self.get_clock().now().to_msg()
+            current_wall_time = now.sec + (now.nanosec * 1e-9)
+            
+            # --- CSV LOGIC (Independent of MQTT) ---
+            # Initialize row with last known data from our buffer
+            csv_row = {k: "" for k in self.csv_fields}
+            csv_row["ts"] = current_wall_time
 
-        if self.last_data_activity == 0:
-            self.last_data_activity = current_wall_time
-            self.get_logger().info(f"Reloj sincronizado (Time: {current_wall_time}). Iniciando monitoreo MQTT...")
-            return
+            # Map current buffer state to CSV
+            # GPS
+            gps = self.latest_data.get("gps")
+            if gps:
+                csv_row.update({
+                    "gps_lat": gps.get("latitude"), "gps_lon": gps.get("longitude"),
+                    "gps_alt": gps.get("altitude"), "gps_status": gps.get("status"),
+                    "gps_service": gps.get("service")
+                })
 
-        # Desconectar si no hay actividad REAL en 10s
-        if (current_wall_time - self.last_data_activity) > NO_DATA_TIMEOUT:
-            if self.is_connected:
-                self.get_logger().warn(f"TIMEOUT: No data updates for {NO_DATA_TIMEOUT}s. Disconnecting MQTT.")
-                self.mqtt_client.disconnect()
-                self.is_connected = False
-            return
-        
-        csv_row = {k: "" for k in self.csv_fields}
-        
-        data_processed = False
+            # Temperature (Canopy)
+            temp = self.latest_data.get("temperature")
+            if temp:
+                csv_row["temperature_canopy"] = round(temp.get("avg_temp", 0), 2)
+                csv_row["temperature_cwsi"] = round(temp.get("avg_cwsi", 0), 2)
 
-        for key, data in self.latest_data.items():
-            if data is None:
-                continue
+            # NDVI
+            ndvi = self.latest_data.get("ndvi")
+            if ndvi:
+                csv_row.update({
+                    "ndvi": ndvi.get("ndvi"), "ndvi3d": ndvi.get("ndvi3d"),
+                    "ndvi_ir": ndvi.get("ndvi_ir"), "ndvi_visible": ndvi.get("ndvi_visible")
+                })
 
-            # Usamos el timestamp original del dato (del callback), no el del sistema
-            ts_to_use = data["ts"]
-            csv_row["ts"] = ts_to_use 
+            # Simple Fields
+            if self.latest_data.get("heading"): csv_row["heading_deg"] = self.latest_data["heading"].get("heading_deg")
+            if self.latest_data.get("area"): csv_row["area"] = self.latest_data["area"].get("area")
+            if self.latest_data.get("location"): csv_row["location"] = self.latest_data["location"].get("location")
+            if self.latest_data.get("biomass"): csv_row["biomass"] = self.latest_data["biomass"].get("biomass")
+            if self.latest_data.get("light_state"): csv_row["crop_light_state"] = self.latest_data["light_state"].get("crop_light_state")
+            if self.latest_data.get("crop_type"): csv_row["crop_type"] = self.latest_data["crop_type"].get("crop_type")
+            if self.latest_data.get("ambient_temperature"): csv_row["ambient_temperature"] = self.latest_data["ambient_temperature"].get("ambient_temperature")
+            if self.latest_data.get("relative_humidity"): csv_row["relative_humidity"] = self.latest_data["relative_humidity"].get("relative_humidity")
+            if self.latest_data.get("absolute_humidity"): csv_row["absolute_humidity"] = self.latest_data["absolute_humidity"].get("absolute_humidity")
+            if self.latest_data.get("dew_point"): csv_row["dew_point"] = self.latest_data["dew_point"].get("dew_point")
+            
+            # TF Position
+            tf = self.latest_data.get("tf_position")
+            if tf:
+                csv_row["tf_utm_baselink_X"] = tf.get("x")
+                csv_row["tf_utm_baselink_Y"] = tf.get("y")
 
-            # 1. Publish MQTT
-            payload = json.dumps(data)
-            if self.is_connected:
-                self.mqtt_client.publish(MQTT_GLOBAL_TOPIC, payload, qos=0)
-                self.get_logger().info(f"Pub MQTT [{key}] TS:{ts_to_use}")
-
-            # 2. Fill CSV 
-            if key == "gps":
-                csv_row["gps_lat"] = data.get("latitude")
-                csv_row["gps_lon"] = data.get("longitude")
-                csv_row["gps_alt"] = data.get("altitude")
-                csv_row["gps_status"] = data.get("status")
-                csv_row["gps_service"] = data.get("service")
-            elif key == "temperature":
-                csv_row["temperature_canopy"] = round(data.get("avg_temp", 0), 2)
-                csv_row["temperature_cwsi"] = round(data.get("avg_cwsi", 0), 2)
-            elif key == "ndvi":
-                csv_row["ndvi"] = data.get("ndvi")
-                csv_row["ndvi3d"] = data.get("ndvi3d")
-                csv_row["ndvi_ir"] = data.get("ndvi_ir")
-                csv_row["ndvi_visible"] = data.get("ndvi_visible")
-            elif key == "heading":
-                csv_row["heading_deg"] = data.get("heading_deg")
-            elif key == "area":
-                csv_row["area"] = data.get("area")
-            elif key == "location":
-                csv_row["location"] = data.get("location")
-            elif key == "biomass":
-                csv_row["biomass"] = data.get("biomass")
-            elif key == "light_state":
-                csv_row["crop_light_state"] = data.get("crop_light_state")
-            elif key == "crop_type":
-                csv_row["crop_type"] = data.get("crop_type")
-            elif key == "ambient_temperature":
-                csv_row["ambient_temperature"] = data.get("ambient_temperature")
-            elif key == "relative_humidity":
-                csv_row["relative_humidity"] = data.get("relative_humidity")
-            elif key == "absolute_humidity":
-                csv_row["absolute_humidity"] = data.get("absolute_humidity")
-            elif key == "dew_point":
-                csv_row["dew_point"] = data.get("dew_point")
-            elif key == "tf_position":
-                csv_row["tf_utm_baselink_X"] = data.get("x")
-                csv_row["tf_utm_baselink_Y"] = data.get("y")
-
-            data_processed = True
-            self.latest_data[key] = None
-
-        if data_processed:
+            # ALWAYS write to CSV (2 times per second)
             try:
                 with open(self.csv_file, "a", newline="") as f:
                     writer = csv.DictWriter(f, fieldnames=self.csv_fields)
                     writer.writerow(csv_row)
             except Exception as e:
-                self.get_logger().error(f"Error writing CSV: {e}")
+                self.get_logger().error(f"CSV Write Error: {e}")
+
+            # --- MQTT LOGIC (Kept separate/Untouched behavior) ---
+            # We only publish via MQTT if there is actually data in the buffers
+            if self.is_connected:
+                for key, data in self.latest_data.items():
+                    if data is not None:
+                        payload = json.dumps(data)
+                        self.mqtt_client.publish(MQTT_GLOBAL_TOPIC, payload, qos=0)
+                
+            # IMPORTANT: We no longer set latest_data[key] = None
+            # This keeps the CSV full even if a topic doesn't send a message in a specific 0.5s window.
 
 def main(args=None):
     rclpy.init(args=args)
