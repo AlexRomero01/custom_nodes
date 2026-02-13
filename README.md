@@ -92,6 +92,8 @@ The main launch file is the entry point for both simulated (rosbag playback) and
 
 - To run in "rosbag / simulated time" mode (no hardware drivers; nodes use the bag's clock):
   - ros2 launch custom_nodes main_launch.py use_sim_time:=true
+  - In example: `` ros2 bag play solarsemi_rows5-6_2026-02-11_11-49-06/ --topics /goal_pose /clicked_point /pce_p18/abs_humidity /initialpose /crop_light_state /tf_utm_baselink /thermal_image_view /tf_static /camera/camera/depth/camera_info                     /thermal_image /parameter_events /gps/fix /odometry/local /tf /rosout /pce_p18/dew_point /odometry/gps /Temperature_and_CSWI/masked_image_with_temperature /camera/camera/depth/image_rect_raw /controller/odometry /gps/                         filtered /NDVI /camera/camera/color/image_raw /pce_p18/temperature /pce_p18/rel_humidity /segmentation_area_info /odometry/global /Temperature_and_CSWI/text /Temperature_and_CSWI/rescaled_rgb --clock``
+
 
 - To run with real hardware (drivers enabled; live sensors):
   - ros2 launch custom_nodes main_launch.py use_sim_time:=false
